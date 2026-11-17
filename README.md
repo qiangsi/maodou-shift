@@ -20,7 +20,7 @@ static server). No build step, no dependencies, no server needed.
 - **Restart level**: R · 重开本关：R
 - Touch buttons appear on mobile.
 
-3 levels, about 10 minutes to finish. Web Audio sound effects
+6 levels, about 15 minutes to finish. Web Audio sound effects
 (jump / shift / collect / win) — no audio files needed.
 
 ## Game Off 2026
