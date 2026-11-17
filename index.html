@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>毛豆·昼夜交替 Maodou Shift — GitHub Game Off 2026</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { background:#10101a; height:100%; overflow:hidden; }
+  body { display:flex; align-items:center; justify-content:center;
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+  #wrap { position:relative; width:min(960px,100vw); }
+  canvas { display:block; width:100%; image-rendering:pixelated;
+    background:#000; touch-action:none; }
+  #touch { position:absolute; left:0; right:0; bottom:10px; display:none;
+    justify-content:space-between; padding:0 12px; pointer-events:none; }
+  #touch.on { display:flex; }
+  .tbtn { pointer-events:auto; width:64px; height:64px; border-radius:50%;
+    background:rgba(255,255,255,.18); border:2px solid rgba(255,255,255,.45);
+    color:#fff; font-size:22px; font-weight:700; text-align:center; line-height:60px;
+    user-select:none; -webkit-user-select:none; }
+  .tbtn:active { background:rgba(255,255,255,.4); }
+  .tgroup { display:flex; gap:12px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="touch">
+    <div class="tgroup">
+      <div class="tbtn" id="btnL">&#9664;</div>
+      <div class="tbtn" id="btnR">&#9654;</div>
+    </div>
+    <div class="tgroup">
+      <div class="tbtn" id="btnJ">&#8593;</div>
+      <div class="tbtn" id="btnS">SHIFT</div>
+    </div>
+  </div>
+</div>
+<script>
+'use strict';
+/* ============================================================
+   毛豆·昼夜交替 Maodou Shift
+   GitHub Game Off 2026 — theme: SHIFT
+   Single-file HTML5 pixel platformer. Press SHIFT to swap the
+   day world and the night world. Platforms, spikes and shards
+   only exist in one world. Collect all shards, reach the door.
+   ============================================================ */
+const TILE = 30, COLS = 32, ROWS = 18, W = 960, H = 540;
+const GRAV = 0.55, MOVE = 3.4, JUMP_V = -11.5;
+
+/* Map legend:
+   # solid in both worlds   = solid in day only   - solid in night only
+   ^ spikes (both worlds)   * spikes in day only  + spikes in night only
+   o sun shard (day)        m moon shard (night)  D door   P player start
+   . empty */
+const LEVELS = [
+{ name:'第一缕光 / First Light', hint:'WASD / 方向键移动，空格跳跃，按 Shift 切换白天与黑夜',
+  map:[
+  '................................',
+  '................................',
+  '..............o.................',
+  '............=====...............',
+  '................................',
+  '....o...........................',
+  '..=====.........................',
+  '................................',
+  '....................m...........',
+  '..................-------.......',
+  '................................',
+  '..........^.....................',
+  '.........####...................',
+  '................................',
+  '...........................D....',
+  '.........................#####..',
+  '................................',
+  '################################',
+  ]},
+{ name:'昼夜之间 / Between Day & Night', hint:'尖刺只在对应世界里伤人，看准世界再跳',
+  map:[
+  '................................',
+  '................................',
+  '........o.......................',
+  '......=====.....................',
+  '................................',
+  '....................m...........',
+  '..................-------.......',
+  '................................',
+  '...*............................',
+  '..####..........................',
+  '................................',
+  '...........o..........+.........',
+  '.........=====.....-------......',
+  '................................',
+  '...........................D....',
+  '....................##########..',
+  '................................',
+  '#######....#####################',
+  ]},
+{ name:'月之彼端 / Far Side of the Moon', hint:'最后一关：碎片集齐才能开门，别掉进虚空',
+  map:[
+  '................................',
+  '................................',
+  '.....o.................m........',
+  '...=====.............-------....',
+  '................................',
+  '.............+..................',
+  '...........-------..............',
+  '................................',
+  '....*................o..........',
+  '..#####............=====........',
+  '................................',
+  '.....................^..........',
+  '....................####........',
+  '................................',
+  '...........................D....',
+  '......##########......#####.....',
+  '................................',
+  '####......##################....',
+  ]},
+];
+
+/* ---------------- state ---------------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let state = 'title';            // title | play | clear | win
+let levelIndex = 0;
+let world = 'day';              // day | night
+let worldMix = 1;               // 1 = full day, 0 = full night (animates)
+let tiles = [], shards = [], spikes = [], door = null, spawn = {x:45, y:480};
+let player = null;
+let flash = 0, hintTimer = 0, clearTimer = 0, deadTimer = 0;
+let shiftCooldown = 0;
+let jumpHeldPrev = false;
+let shake = 0;
+let stars = [];
+for (let i = 0; i < 90; i++) stars.push({x: Math.random()*W, y: Math.random()*H*0.6, r: Math.random()*1.6+0.4, tw: Math.random()*6.28});
+
+function parseLevel(li){
+  const L = LEVELS[li];
+  tiles = []; shards = []; spikes = []; door = null;
+  spawn = {x: 1.5*TILE, y: 16*TILE};
+  for (let r = 0; r < ROWS; r++){
+    tiles[r] = [];
+    for (let c = 0; c < COLS; c++){
+      const ch = (L.map[r] && L.map[r][c]) || '.';
+      tiles[r][c] = ch;
+      if (ch === 'o') shards.push({c, r, kind:'sun', taken:false});
+      if (ch === 'm') shards.push({c, r, kind:'moon', taken:false});
+      if (ch === '^' || ch === '*' || ch === '+') spikes.push({c, r, kind:ch});
+      if (ch === 'D') door = {c, r};
+      if (ch === 'P') spawn = {x: c*TILE + 5, y: r*TILE + 2};
+    }
+  }
+  player = {x: spawn.x, y: spawn.y, vx:0, vy:0, w:20, h:28,
+    face:1, onGround:false, coyote:0, jbuf:0, dead:false};
+  world = 'day'; worldMix = 1; flash = 0; hintTimer = 0; deadTimer = 0;
+}
+
+function solidAt(c, r, w){
+  if (c < 0 || c >= COLS) return true;      // side walls
+  if (r < 0 || r >= ROWS) return false;     // top open, bottom = pit
+  const ch = tiles[r][c];
+  if (ch === '#') return true;
+  if (ch === '=') return w === 'day';
+  if (ch === '-') return w === 'night';
+  return false;
+}
+function tileRectsOverlap(px, py, pw, ph, c, r, inset){
+  const x0 = c*TILE + inset, y0 = r*TILE + inset;
+  return px < x0 + TILE - inset*2 && px + pw > x0 && py < y0 + TILE - inset*2 && py + ph > y0;
+}
+
+/* ---------------- audio ---------------- */
+let AC = null;
+function audio(){
+  if (!AC){ try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){ AC = null; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(f0, f1, dur, type, vol){
+  const ac = audio(); if (!ac) return;
+  const t = ac.currentTime;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(f0, t);
+  if (f1 && f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(f1,1), t + dur);
+  g.gain.setValueAtTime(vol || 0.12, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+const sfx = {
+  jump(){ tone(280, 540, 0.14, 'square', 0.10); },
+  shift(){ tone(180, 920, 0.28, 'sawtooth', 0.07); tone(920, 180, 0.28, 'sine', 0.05); },
+  shard(){ tone(880, 880, 0.08, 'sine', 0.12); setTimeout(()=>tone(1318, 1318, 0.12, 'sine', 0.12), 70); },
+  death(){ tone(200, 55, 0.35, 'sawtooth', 0.12); },
+  door(){ [523,659,784,1046].forEach((f,i)=>setTimeout(()=>tone(f, f, 0.16, 'triangle', 0.12), i*90)); },
+  denied(){ tone(140, 110, 0.12, 'square', 0.08); },
+};
+
+/* ---------------- input ---------------- */
+const keys = {};
+let touchL = false, touchR = false, touchJ = false;
+function pressJump(){ if (player) player.jbuf = 6; }
+function pressShift(){ doShift(); }
+window.addEventListener('keydown', (e)=>{
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) e.preventDefault();
+  if (e.repeat) return;
+  keys[e.code] = true;
+  audio();
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') pressJump();
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') pressShift();
+  if (e.code === 'Enter' || e.code === 'Space') advanceState();
+  if (e.code === 'KeyR' && state === 'play') resetLevel();
+});
+window.addEventListener('keyup', (e)=>{ keys[e.code] = false; });
+canvas.addEventListener('pointerdown', ()=>{ audio(); advanceState(); });
+function bindBtn(id, down, up){
+  const el = document.getElementById(id);
+  el.addEventListener('pointerdown', (e)=>{ e.preventDefault(); audio(); down(); });
+  el.addEventListener('pointerup', ()=>up && up());
+  el.addEventListener('pointerleave', ()=>up && up());
+}
+bindBtn('btnL', ()=>touchL = true, ()=>touchL = false);
+bindBtn('btnR', ()=>touchR = true, ()=>touchR = false);
+bindBtn('btnJ', ()=>{ touchJ = true; pressJump(); }, ()=>touchJ = false);
+bindBtn('btnS', ()=>pressShift());
+if ('ontouchstart' in window || navigator.maxTouchPoints > 0)
+  document.getElementById('touch').classList.add('on');
+
+function advanceState(){
+  if (state === 'title'){ state = 'play'; }
+  else if (state === 'win'){ levelIndex = 0; parseLevel(0); state = 'play'; }
+}
+function doShift(){
+  if (state !== 'play' || shiftCooldown > 0 || (player && player.dead)) return;
+  world = world === 'day' ? 'night' : 'day';
+  shiftCooldown = 18; flash = 10; shake = 4;
+  sfx.shift();
+}
+function resetLevel(){
+  parseLevel(levelIndex);
+}
+
+/* ---------------- update ---------------- */
+function moveAndCollide(p, w){
+  // X axis
+  p.x += p.vx;
+  let c0 = Math.floor(p.x / TILE), c1 = Math.floor((p.x + p.w - 1) / TILE);
+  let r0 = Math.floor(p.y / TILE), r1 = Math.floor((p.y + p.h - 1) / TILE);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++){
+    if (solidAt(c, r, w)){
+      if (p.vx > 0) p.x = c*TILE - p.w - 0.01;
+      else if (p.vx < 0) p.x = (c+1)*TILE + 0.01;
+      p.vx = 0;
+    }
+  }
+  // Y axis
+  p.y += p.vy;
+  p.onGround = false;
+  c0 = Math.floor(p.x / TILE); c1 = Math.floor((p.x + p.w - 1) / TILE);
+  r0 = Math.floor(p.y / TILE); r1 = Math.floor((p.y + p.h - 1) / TILE);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++){
+    if (solidAt(c, r, w)){
+      if (p.vy > 0){ p.y = r*TILE - p.h - 0.01; p.onGround = true; }
+      else if (p.vy < 0){ p.y = (r+1)*TILE + 0.01; }
+      p.vy = 0;
+    }
+  }
+  // ground probe: standing exactly on a tile edge still counts as grounded
+  if (!p.onGround){
+    const probeY = p.y + p.h + 1;
+    const pr = Math.floor(probeY / TILE);
+    const pcA = Math.floor((p.x + 2) / TILE), pcB = Math.floor((p.x + p.w - 2) / TILE);
+    if (solidAt(pcA, pr, w) || solidAt(pcB, pr, w)) p.onGround = true;
+  }
+}
+function shardsLeft(){ return shards.filter(s => !s.taken).length; }
+
+function update(){
+  // world blend animation
+  const target = world === 'day' ? 1 : 0;
+  worldMix += (target - worldMix) * 0.08;
+  if (Math.abs(target - worldMix) < 0.002) worldMix = target;
+  if (flash > 0) flash--;
+  if (hintTimer > 0) hintTimer--;
+  if (shiftCooldown > 0) shiftCooldown--;
+  if (shake > 0) shake *= 0.86; if (shake < 0.3) shake = 0;
+
+  if (state === 'clear'){
+    if (--clearTimer <= 0){
+      levelIndex++;
+      if (levelIndex >= LEVELS.length){ levelIndex = LEVELS.length - 1; state = 'win'; }
+      else { parseLevel(levelIndex); state = 'play'; }
+    }
+    return;
+  }
+  if (state !== 'play' || !player) return;
+
+  if (player.dead){
+    if (--deadTimer <= 0) resetLevel();
+    return;
+  }
+
+  const left = keys['ArrowLeft'] || keys['KeyA'] || touchL;
+  const right = keys['ArrowRight'] || keys['KeyD'] || touchR;
+  const jumpHeld = keys['Space'] || keys['ArrowUp'] || keys['KeyW'] || touchJ;
+  if (left && !right){ player.vx = -MOVE; player.face = -1; }
+  else if (right && !left){ player.vx = MOVE; player.face = 1; }
+  else player.vx *= 0.7;
+
+  player.vy += GRAV;
+  if (player.vy > 14) player.vy = 14;
+  if (player.onGround) player.coyote = 6; else if (player.coyote > 0) player.coyote--;
+  if (player.jbuf > 0) player.jbuf--;
+  if (player.jbuf > 0 && (player.onGround || player.coyote > 0)){
+    player.vy = JUMP_V; player.jbuf = 0; player.coyote = 0; player.onGround = false;
+    sfx.jump();
+  }
+  // variable jump height: releasing jump mid-rise cuts the ascent once
+  if (!jumpHeld && jumpHeldPrev && player.vy < 0) player.vy *= 0.5;
+  jumpHeldPrev = jumpHeld;
+
+  moveAndCollide(player, world);
+
+  // fell into the void
+  if (player.y > H + 40){ killPlayer(); return; }
+
+  // spikes
+  for (const s of spikes){
+    const active = s.kind === '^' || (s.kind === '*' && world === 'day') || (s.kind === '+' && world === 'night');
+    if (active && tileRectsOverlap(player.x, player.y, player.w, player.h, s.c, s.r, 8)){
+      killPlayer(); return;
+    }
+  }
+  // shards
+  for (const s of shards){
+    if (s.taken) continue;
+    if ((s.kind === 'sun') !== (world === 'day')) continue;
+    const cx = s.c*TILE + 15, cy = s.r*TILE + 15;
+    if (Math.abs(player.x + player.w/2 - cx) < 26 && Math.abs(player.y + player.h/2 - cy) < 28){
+      s.taken = true; sfx.shard();
+    }
+  }
+  // door
+  if (door){
+    const dx = door.c*TILE, dy = door.r*TILE;
+    if (player.x < dx + TILE && player.x + player.w > dx && player.y < dy + TILE && player.y + player.h > dy){
+      if (shardsLeft() === 0){
+        state = 'clear'; clearTimer = 80; sfx.door();
+      } else if (hintTimer <= 0){
+        hintTimer = 90; sfx.denied();
+      }
+    }
+  }
+}
+function killPlayer(){
+  if (player.dead) return;
+  player.dead = true; deadTimer = 45; shake = 7;
+  sfx.death();
+}
+
+/* ---------------- render ---------------- */
+function lerp(a, b, t){ return a + (b - a) * t; }
+function mixColor(c1, c2, t){
+  return 'rgb(' + Math.round(lerp(c1[0], c2[0], t)) + ',' + Math.round(lerp(c1[1], c2[1], t)) + ',' + Math.round(lerp(c1[2], c2[2], t)) + ')';
+}
+const SKY_DAY = [[126,200,247],[223,243,255]], SKY_NIGHT = [[11,16,53],[42,35,80]];
+
+function draw(){
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random()-0.5)*shake, (Math.random()-0.5)*shake);
+  const m = worldMix;   // 1 day, 0 night
+  // sky
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, mixColor(SKY_NIGHT[0], SKY_DAY[0], m));
+  grad.addColorStop(1, mixColor(SKY_NIGHT[1], SKY_DAY[1], m));
+  ctx.fillStyle = grad; ctx.fillRect(-10, -10, W+20, H+20);
+  // stars
+  if (m < 0.9){
+    ctx.fillStyle = '#fff';
+    for (const s of stars){
+      ctx.globalAlpha = (1 - m) * (0.4 + 0.6 * Math.abs(Math.sin(Date.now()/700 + s.tw)));
+      ctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+    ctx.globalAlpha = 1;
+  }
+  // sun / moon
+  ctx.globalAlpha = m;
+  ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.arc(838, 72, 34, 0, 6.29); ctx.fill();
+  ctx.fillStyle = '#ffedb0'; ctx.beginPath(); ctx.arc(838, 72, 26, 0, 6.29); ctx.fill();
+  ctx.globalAlpha = 1 - m;
+  ctx.fillStyle = '#f4f1de'; ctx.beginPath(); ctx.arc(838, 72, 28, 0, 6.29); ctx.fill();
+  ctx.fillStyle = mixColor(SKY_NIGHT[0], SKY_DAY[0], m);
+  ctx.beginPath(); ctx.arc(828, 64, 24, 0, 6.29); ctx.fill();
+  ctx.globalAlpha = 1;
+  // distant hills
+  ctx.fillStyle = mixColor([24,20,64], [110,170,110], m);
+  ctx.beginPath(); ctx.moveTo(0, 470);
+  for (let x = 0; x <= W; x += 60) ctx.lineTo(x, 470 - 46 * Math.abs(Math.sin(x * 0.011 + 2)));
+  ctx.lineTo(W, 540); ctx.lineTo(0, 540); ctx.fill();
+
+  // tiles
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++){
+    const ch = tiles[r][c];
+    if (ch !== '#' && ch !== '=' && ch !== '-') continue;
+    const active = ch === '#' || (ch === '=' && world === 'day') || (ch === '-' && world === 'night');
+    const x = c*TILE, y = r*TILE;
+    ctx.globalAlpha = active ? 1 : 0.16;
+    if (ch === '#') ctx.fillStyle = mixColor([58,48,110], [96,116,72], m);
+    else if (ch === '=') ctx.fillStyle = '#e0a83c';
+    else ctx.fillStyle = '#7a68d8';
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.globalAlpha = active ? 1 : 0.16;
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillRect(x, y, TILE, 5);
+    ctx.globalAlpha = 1;
+  }
+  // spikes
+  for (const s of spikes){
+    const active = s.kind === '^' || (s.kind === '*' && world === 'day') || (s.kind === '+' && world === 'night');
+    const x = s.c*TILE, y = s.r*TILE;
+    ctx.globalAlpha = active ? 1 : 0.16;
+    ctx.fillStyle = active ? '#e8e8f0' : '#8888aa';
+    ctx.beginPath();
+    ctx.moveTo(x+2, y+TILE); ctx.lineTo(x+10, y+8); ctx.lineTo(x+15, y+TILE);
+    ctx.moveTo(x+17, y+TILE); ctx.lineTo(x+24, y+8); ctx.lineTo(x+28, y+TILE);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  // shards
+  const t = Date.now() / 300;
+  for (const s of shards){
+    if (s.taken) continue;
+    const isSun = s.kind === 'sun';
+    const active = isSun === (world === 'day');
+    const cx = s.c*TILE + 15, cy = s.r*TILE + 15 + Math.sin(t + s.c) * 3;
+    ctx.globalAlpha = active ? 1 : 0.22;
+    if (isSun){
+      ctx.fillStyle = '#ffcf3d';
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++){
+        const a = i * Math.PI / 4 + t * 0.3, rr = i % 2 ? 6 : 12;
+        ctx[i ? 'lineTo' : 'moveTo'](cx + Math.cos(a)*rr, cy + Math.sin(a)*rr);
+      }
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#cfd8ff';
+      ctx.beginPath(); ctx.arc(cx, cy, 10, 0, 6.29); ctx.fill();
+      ctx.fillStyle = mixColor(SKY_NIGHT[0], SKY_DAY[0], m);
+      ctx.beginPath(); ctx.arc(cx-4, cy-3, 8, 0, 6.29); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  // door
+  if (door){
+    const x = door.c*TILE, y = door.r*TILE;
+    const open = shardsLeft() === 0;
+    ctx.fillStyle = open ? '#7dff9a' : '#5a4a8a';
+    ctx.fillRect(x+4, y+2, TILE-8, TILE-2);
+    ctx.fillStyle = open ? '#1d7a33' : '#2c2350';
+    ctx.beginPath(); ctx.arc(x+15, y+18, open ? 6 : 4, 0, 6.29); ctx.fill();
+    if (open){ ctx.fillStyle = '#eaffea'; ctx.font = 'bold 11px sans-serif'; ctx.fillText('GO', x+8, y+26); }
+  }
+  // player sprout
+  if (player && state !== 'title'){
+    const p = player;
+    if (!p.dead){
+      const bob = p.onGround ? 0 : 2;
+      ctx.fillStyle = '#2fae4e';
+      ctx.fillRect(p.x+3, p.y+8+bob, 14, 20);                    // stem body
+      ctx.fillStyle = '#57d977';
+      ctx.fillRect(p.x+3, p.y+8+bob, 14, 5);                     // head
+      ctx.fillStyle = '#2fae4e';                                  // leaves
+      ctx.fillRect(p.x-3, p.y+2+bob, 9, 6);
+      ctx.fillRect(p.x+14, p.y+2+bob, 9, 6);
+      ctx.fillStyle = '#12351d';                                  // eyes
+      const ex = p.face > 0 ? 2 : -2;
+      ctx.fillRect(p.x+7+ex, p.y+14+bob, 3, 4);
+      ctx.fillRect(p.x+12+ex, p.y+14+bob, 3, 4);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';                        // feet
+      ctx.fillRect(p.x+4, p.y+26, 5, 2); ctx.fillRect(p.x+11, p.y+26, 5, 2);
+    } else {
+      ctx.fillStyle = '#2fae4e';
+      ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('✕', p.x+10, p.y+16);
+      ctx.textAlign = 'left';
+    }
+  }
+  // flash on shift
+  if (flash > 0){ ctx.fillStyle = 'rgba(255,255,255,' + (flash/10*0.35) + ')'; ctx.fillRect(-10, -10, W+20, H+20); }
+
+  // HUD
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0, 0, W, 34);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif';
+  ctx.fillText('第 ' + (levelIndex+1) + '/' + LEVELS.length + ' 关 · ' + LEVELS[levelIndex].name, 12, 22);
+  const total = shards.length, got = total - shardsLeft();
+  ctx.fillText('☀☾ ' + got + '/' + total, 560, 22);
+  ctx.fillStyle = world === 'day' ? '#ffd93b' : '#bdb2ff';
+  ctx.fillText(world === 'day' ? '☀ 白天 DAY' : '☾ 黑夜 NIGHT', 820, 22);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = '13px sans-serif';
+  ctx.fillText(LEVELS[levelIndex].hint, 12, H - 12);
+  if (hintTimer > 0){
+    ctx.fillStyle = '#ffb84d'; ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('门还没开：还差 ' + shardsLeft() + ' 个碎片！', W/2, 70);
+    ctx.textAlign = 'left';
+  }
+  // overlays
+  if (state === 'title'){
+    ctx.fillStyle = 'rgba(8,8,24,0.72)'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#8be28b'; ctx.font = 'bold 54px sans-serif';
+    ctx.fillText('毛豆·昼夜交替', W/2, 168);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 26px sans-serif';
+    ctx.fillText('MAODOU SHIFT', W/2, 208);
+    ctx.fillStyle = '#ffd93b'; ctx.font = '16px sans-serif';
+    ctx.fillText('GitHub Game Off 2026 · 主题 SHIFT', W/2, 240);
+    ctx.fillStyle = '#fff'; ctx.font = '17px sans-serif';
+    ctx.fillText('按 Shift 键，白天与黑夜瞬间对调', W/2, 300);
+    ctx.fillText('只有对应世界里的平台才能站，碎片集齐才能开门', W/2, 328);
+    ctx.fillStyle = '#bdb2ff'; ctx.font = '15px sans-serif';
+    ctx.fillText('移动 WASD / 方向键 · 跳跃 空格 · 切换 Shift · 重开 R', W/2, 372);
+    ctx.fillText('Move: WASD / Arrows · Jump: Space · Shift world: Shift key', W/2, 398);
+    ctx.fillStyle = '#8be28b'; ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('按 Enter 或点击开始  ·  Press Enter or click to start', W/2, 452);
+    ctx.textAlign = 'left';
+  } else if (state === 'clear'){
+    ctx.fillStyle = 'rgba(8,8,24,0.55)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 40px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('过关！Level Clear!', W/2, H/2);
+    ctx.textAlign = 'left';
+  } else if (state === 'win'){
+    ctx.fillStyle = 'rgba(8,8,24,0.78)'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#8be28b'; ctx.font = 'bold 44px sans-serif';
+    ctx.fillText('通关！你完成了昼夜交替', W/2, 220);
+    ctx.fillStyle = '#fff'; ctx.font = '18px sans-serif';
+    ctx.fillText('Thanks for playing Maodou Shift · Game Off 2026', W/2, 268);
+    ctx.fillStyle = '#8be28b'; ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('按 Enter 再玩一次', W/2, 320);
+    ctx.textAlign = 'left';
+  }
+  ctx.restore();
+}
+
+/* ---------------- main loop ---------------- */
+parseLevel(0);
+function loop(){
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
